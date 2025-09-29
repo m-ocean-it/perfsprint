@@ -105,7 +105,7 @@ func isConcatable(verb string) bool {
 	if strings.Count(verb, "%[1]s") > 1 {
 		return false
 	}
-	return (hasPrefix || hasSuffix) && !(hasPrefix && hasSuffix)
+	return (hasPrefix || hasSuffix) // TODO make more linient
 }
 
 func (n *perfSprint) run(pass *analysis.Pass) (interface{}, error) {
@@ -148,10 +148,11 @@ func (n *perfSprint) run(pass *analysis.Pass) (interface{}, error) {
 		calledObj := pass.TypesInfo.ObjectOf(called.Sel)
 
 		var (
-			fn    string
-			verb  string
-			value ast.Expr
-			err   error
+			fn         string
+			verb       string
+			value      ast.Expr
+			moreValues []ast.Expr
+			err        error
 		)
 		switch {
 		case calledObj == fmtErrorfObj && len(call.Args) == 1 && n.errFormat.errorf:
@@ -169,7 +170,7 @@ func (n *perfSprint) run(pass *analysis.Pass) (interface{}, error) {
 			verb = "%s"
 			value = call.Args[0]
 
-		case calledObj == fmtSprintfObj && len(call.Args) == 2:
+		case calledObj == fmtSprintfObj && len(call.Args) > 1:
 			verbLit, ok := call.Args[0].(*ast.BasicLit)
 			if !ok {
 				return
@@ -179,13 +180,12 @@ func (n *perfSprint) run(pass *analysis.Pass) (interface{}, error) {
 				// Probably unreachable.
 				return
 			}
-			// one single explicit arg is simplified
-			if strings.HasPrefix(verb, "%[1]") {
-				verb = "%" + verb[4:]
-			}
+
+			// TODO: numbered verbs
 
 			fn = "fmt.Sprintf"
 			value = call.Args[1]
+			moreValues = call.Args[2:]
 
 		default:
 			return
@@ -496,16 +496,14 @@ func (n *perfSprint) run(pass *analysis.Pass) (interface{}, error) {
 				},
 			)
 		case isBasicType(valueType, types.String) && fn == "fmt.Sprintf" && isConcatable(verb) && n.strFormat.enabled:
-			var fix string
-			if strings.HasSuffix(verb, "%s") {
-				fix = strings.ReplaceAll(strconv.Quote(verb[:len(verb)-2]), "%%", "%") + "+" + formatNode(pass.Fset, value)
-			} else if strings.HasSuffix(verb, "%[1]s") {
-				fix = strings.ReplaceAll(strconv.Quote(verb[:len(verb)-5]), "%%", "%") + "+" + formatNode(pass.Fset, value)
-			} else if strings.HasPrefix(verb, "%s") {
-				fix = formatNode(pass.Fset, value) + "+" + strings.ReplaceAll(strconv.Quote(verb[2:]), "%%", "%")
-			} else {
-				fix = formatNode(pass.Fset, value) + "+" + strings.ReplaceAll(strconv.Quote(verb[5:]), "%%", "%")
+			news := make([]string, 0, 1+len(moreValues))
+			news = append(news, formatNode(pass.Fset, value))
+			for _, v := range moreValues {
+				news = append(news, formatNode(pass.Fset, v))
 			}
+
+			fix := ReplaceWith(verb, "%s", news)
+
 			fname := pass.Fset.File(call.Pos()).Name()
 			removedFmtUsages[fname]++
 			d = newAnalysisDiagnostic(
